@@ -96,5 +96,73 @@ class AlphaKeyLoadVideo:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-NODE_CLASS_MAPPINGS = {"AlphaKeyScreenMatte": AlphaKeyScreenMatte, "AlphaKeyLoadVideo": AlphaKeyLoadVideo}
-NODE_DISPLAY_NAME_MAPPINGS = {"AlphaKeyScreenMatte": "Alpha Key (flat background)", "AlphaKeyLoadVideo": "Alpha Key Load Video (native size)"}
+class AlphaKeyCleanup:
+    """Hard-edge cleanup for keyed pixel art: threshold alpha, drop edge pixels that are still background
+    coloured, remove stray specks, fill pinholes, then recolour every edge pixel from the nearest solid
+    interior pixel so no background colour can survive on the outline. Background colour = median of the
+    border over ALL frames (stable, so edges do not jitter with per-frame noise)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "rgba": ("IMAGE",), "source": ("IMAGE",),
+            "alpha_threshold": ("FLOAT", {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.01}),
+            "bg_distance": ("FLOAT", {"default": 0.12, "min": 0.0, "max": 0.6, "step": 0.01}),
+            "edge_depth": ("INT", {"default": 2, "min": 0, "max": 8}),
+            "min_island": ("INT", {"default": 6, "min": 0, "max": 5000}),
+            "fill_holes": ("INT", {"default": 4, "min": 0, "max": 5000}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("rgba", "alpha")
+    FUNCTION = "clean"
+    CATEGORY = "AlphaKey"
+
+    def clean(self, rgba, source, alpha_threshold, bg_distance, edge_depth, min_island, fill_holes):
+        import numpy as np
+        try:
+            from scipy import ndimage as ndi
+        except Exception:
+            ndi = None
+        src = source[..., :3].cpu().numpy()
+        n, h, w, _ = src.shape
+        border = np.concatenate([src[:, :2].reshape(-1, 3), src[:, -2:].reshape(-1, 3),
+                                 src[:, :, :2].reshape(-1, 3), src[:, :, -2:].reshape(-1, 3)])
+        bg = np.median(border, axis=0)
+        st = np.ones((3, 3), bool)
+        out_rgba, out_a = [], []
+        for i in range(n):
+            a = rgba[i, ..., 3].cpu().numpy()
+            rgb = src[i]
+            hard = a > alpha_threshold
+            if ndi is not None:
+                # 1) edge-band pixels that still look like the background are not subject
+                core = ndi.binary_erosion(hard, st, iterations=2) if edge_depth else hard
+                near_bg = np.sqrt(((rgb - bg) ** 2).sum(-1)) < bg_distance
+                hard = hard & ~((hard & ~core) & near_bg)
+                # 2) stray specks and pinholes
+                if min_island > 0:
+                    lab, k = ndi.label(hard, st)
+                    if k:
+                        size = ndi.sum(hard, lab, range(1, k + 1))
+                        hard = np.isin(lab, np.nonzero(size >= min_island)[0] + 1)
+                if fill_holes > 0:
+                    lab, k = ndi.label(~hard, st)
+                    if k:
+                        size = ndi.sum(~hard, lab, range(1, k + 1))
+                        edge_lab = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]])))
+                        small = [j + 1 for j in range(k) if size[j] < fill_holes and (j + 1) not in edge_lab]
+                        hard = hard | np.isin(lab, small)
+                # 3) recolour edge pixels from the nearest trusted interior pixel
+                trusted = ndi.binary_erosion(hard, st, iterations=edge_depth) if edge_depth else hard
+                if trusted.any() and edge_depth:
+                    _, (iy, ix) = ndi.distance_transform_edt(~trusted, return_indices=True)
+                    rgb = np.where(trusted[..., None], rgb, rgb[iy, ix])
+            alpha = hard.astype(np.float32)
+            out = np.concatenate([np.where(hard[..., None], rgb, 0.0), alpha[..., None]], -1)
+            out_rgba.append(torch.from_numpy(out.astype(np.float32))); out_a.append(torch.from_numpy(alpha))
+        return (torch.stack(out_rgba), torch.stack(out_a))
+
+
+NODE_CLASS_MAPPINGS = {"AlphaKeyCleanup": AlphaKeyCleanup, "AlphaKeyScreenMatte": AlphaKeyScreenMatte, "AlphaKeyLoadVideo": AlphaKeyLoadVideo}
+NODE_DISPLAY_NAME_MAPPINGS = {"AlphaKeyCleanup": "Alpha Key Cleanup (hard edges)", "AlphaKeyScreenMatte": "Alpha Key (flat background)", "AlphaKeyLoadVideo": "Alpha Key Load Video (native size)"}

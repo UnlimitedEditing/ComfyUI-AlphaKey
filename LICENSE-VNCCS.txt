@@ -1,0 +1,5 @@
+screen_matte_vnccs.py is copied unmodified from https://github.com/AHEKOT/ComfyUI_VNCCS
+(nodes/chroma_screen_matte.py), MIT License, Copyright (c) the VNCCS authors.
+Permission is hereby granted, free of charge, to use, copy, modify, merge, publish, distribute,
+sublicense and/or sell copies of the software, subject to this notice being included in all copies.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
